@@ -89,12 +89,25 @@ Each entry includes a URL, title, type, topic tags, date, and summary. `Shared b
 and `Context` (`work` or `personal`) remain optional. Explicit safe CLI tags are
 not limited to the curator's automatic three-topic recommendation.
 
+`Shared by` names are compared using Unicode normalization, whitespace
+normalization, and case-insensitive matching. Exact matches reuse the spelling
+already present in dated archive notes. Similar names are never merged
+automatically: the curator asks whether they identify the same person before
+retrying with the archived spelling or an explicit different-person override.
+
+Context input is normalized to the canonical `work` or `personal` value. Links
+that the user explicitly identifies as concerning their children use
+`personal` context and the `kids` tag. A child-specific name tag is added only
+when the user explicitly supplies that identity; it is never inferred from
+profile memory, archive content, or webpage content.
+
 The save tool validates all fields before filesystem changes, serializes writers
-with a vault lock, replaces each Markdown file atomically, rejects duplicate
-URLs, and uses a hidden journal to reconcile an interrupted two-file save. A
-dated note and `INDEX.md` cannot be replaced as one filesystem transaction; the
-journal makes that two-step operation recoverable without silently rebuilding or
-discarding unrelated index content.
+with a vault lock, recovers interrupted work before checking canonical metadata,
+replaces each Markdown file atomically, rejects duplicate URLs, and uses a
+hidden journal to reconcile an interrupted two-file save. A dated note and
+`INDEX.md` cannot be replaced as one filesystem transaction; the journal makes
+that two-step operation recoverable without silently rebuilding or discarding
+unrelated index content.
 
 ## Repository layout
 

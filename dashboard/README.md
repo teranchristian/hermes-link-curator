@@ -40,7 +40,13 @@ All application scripts, styles, and fonts are local; D3 7.9.0 is vendored under
 python3 validate.py
 ```
 
-Checks every entry in `INDEX.md` for missing fields, malformed dates, double-`---` separators, and other parse-breaking issues. Run this from inside the dashboard directory.
+Checks every entry in `INDEX.md` for missing fields, malformed dates,
+double-`---` separators, and other parse-breaking issues. It also reads canonical
+dated notes to report `Shared by` values that differ only by normalization and
+possible one-edit spelling variants. `INDEX.md` is deliberately excluded from
+those cross-entry name comparisons so mirrored entries are not counted twice.
+Validation reports issues without rewriting or merging archive entries. Run this
+from inside the dashboard directory.
 
 ## Caching
 
