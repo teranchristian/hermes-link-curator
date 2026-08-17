@@ -12,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "dashboard"
+METADATA_HELPER = ROOT / "skill-obsidian" / "scripts" / "metadata_consistency.py"
 DATE = "2026-08-17"
 
 
@@ -53,9 +54,15 @@ def entry_block(
 
 
 def write_index(vault: Path, *entries: str) -> None:
-    vault.mkdir(parents=True)
+    vault.mkdir(parents=True, exist_ok=True)
     body = "\n---\n".join(entries)
     (vault / "INDEX.md").write_text(f"# Index\n---\n{body}\n---\n")
+
+
+def write_daily(vault: Path, *entries: str, date: str = DATE) -> None:
+    vault.mkdir(parents=True, exist_ok=True)
+    body = "\n---\n".join(entries)
+    (vault / f"{date}.md").write_text(f"# {date}\n\n{body}\n---\n")
 
 
 @pytest.mark.parametrize(
@@ -220,6 +227,134 @@ def test_validation_rejects_duplicate_shared_by(monkeypatch: pytest.MonkeyPatch,
 
     assert not result.valid
     assert any("Shared by" in error for error in result.errors)
+
+
+def test_validator_loads_metadata_helper_from_repository_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, validate, _ = load_modules(monkeypatch, tmp_path / "vault")
+
+    helper = validate._load_metadata_consistency(ROOT / "dashboard" / "validate.py")
+
+    assert Path(helper.__file__).resolve() == METADATA_HELPER.resolve()
+    assert helper.shared_by_key("  IBBY  ") == "ibby"
+
+
+def test_validator_loads_metadata_helper_from_installed_profile_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, validate, _ = load_modules(monkeypatch, tmp_path / "vault")
+    profile = tmp_path / "profile"
+    validate_path = profile / "dashboard" / "validate.py"
+    helper_path = (
+        profile
+        / "skills"
+        / "note-taking"
+        / "obsidian"
+        / "scripts"
+        / "metadata_consistency.py"
+    )
+    validate_path.parent.mkdir(parents=True)
+    helper_path.parent.mkdir(parents=True)
+    validate_path.write_text("# installed validator location\n")
+    helper_path.write_text(METADATA_HELPER.read_text())
+
+    helper = validate._load_metadata_consistency(validate_path)
+
+    assert Path(helper.__file__).resolve() == helper_path.resolve()
+    assert helper.are_similar_shared_by("John", "Jon")
+
+
+def test_validator_missing_helper_does_not_fall_back_to_pythonpath(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _, validate, _ = load_modules(monkeypatch, tmp_path / "vault")
+    validate_path = tmp_path / "missing-profile" / "dashboard" / "validate.py"
+    rogue = tmp_path / "rogue"
+    validate_path.parent.mkdir(parents=True)
+    rogue.mkdir()
+    validate_path.write_text("# missing helper layout\n")
+    (rogue / "metadata_consistency.py").write_text("ROGUE = True\n")
+    monkeypatch.syspath_prepend(str(rogue))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        validate._load_metadata_consistency(validate_path)
+
+    message = str(exc_info.value)
+    assert "metadata consistency helper is missing" in message
+    assert "skill-obsidian/scripts/metadata_consistency.py" in message
+    assert "skills/note-taking/obsidian/scripts/metadata_consistency.py" in message
+    assert str(rogue) not in message
+
+
+def test_cross_entry_shared_by_validation_uses_dated_notes_not_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    write_daily(vault, entry_block("Canonical", shared_by="Ibby"))
+    write_index(
+        vault,
+        entry_block("Canonical", shared_by="Ibby"),
+        entry_block("Index only", shared_by="Iby", url="https://example.com/index-only"),
+    )
+    _, validate, _ = load_modules(monkeypatch, vault)
+
+    report = validate.validate_vault(str(vault))
+
+    assert report["metadata_errors"] == []
+    assert report["metadata_warnings"] == []
+    assert report["total_entries"] == 2
+
+
+def test_validator_reports_exact_and_similar_dated_name_pairs_once_deterministically(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    entries = (
+        entry_block("One", shared_by="Ibby", url="https://example.com/one"),
+        entry_block("Two", shared_by="ibby", url="https://example.com/two"),
+        entry_block("Three", shared_by="Iby", url="https://example.com/three"),
+        entry_block("Four", shared_by="Ibby", url="https://example.com/four"),
+    )
+    write_daily(vault, *entries)
+    write_index(vault, *entries)
+    _, validate, _ = load_modules(monkeypatch, vault)
+    before = {path.name: path.read_bytes() for path in vault.iterdir() if path.is_file()}
+
+    first = validate.validate_vault(str(vault))
+    second = validate.validate_vault(str(vault))
+
+    assert first == second
+    assert [item["names"] for item in first["metadata_errors"]] == [["Ibby", "ibby"]]
+    assert [item["names"] for item in first["metadata_warnings"]] == [
+        ["Ibby", "Iby"],
+        ["Iby", "ibby"],
+    ]
+    assert {path.name: path.read_bytes() for path in vault.iterdir() if path.is_file()} == before
+
+
+def test_index_remains_structurally_validated_with_dated_name_analysis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    valid = entry_block("Dated", shared_by="Ibby")
+    invalid_index = entry_block(
+        "Index malformed", shared_by="Ibby", context="business"
+    )
+    write_daily(vault, valid)
+    write_index(vault, invalid_index)
+    _, validate, _ = load_modules(monkeypatch, vault)
+
+    report = validate.validate_vault(str(vault))
+
+    assert report["broken"]
+    assert any(
+        "Context" in error
+        for broken in report["broken"]
+        for error in broken["errors"]
+    )
+    assert report["metadata_errors"] == []
+    assert report["metadata_warnings"] == []
 
 
 def make_dashboard_client(monkeypatch: pytest.MonkeyPatch, vault: Path):

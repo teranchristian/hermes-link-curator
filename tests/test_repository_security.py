@@ -59,3 +59,34 @@ def test_installer_security_behaviour_is_preserved() -> None:
     assert 'DASHBOARD_BIND_ADDRESS="127.0.0.1"' in installer
     assert "0.0.0.0" not in installer
     assert not re.search(r"\beval\b", installer)
+
+
+def test_curator_skill_documents_shared_by_ambiguity_confirmation() -> None:
+    skill = (ROOT / "skill-obsidian" / "SKILL.md").read_text().casefold()
+    normalized = " ".join(skill.split())
+
+    assert "ambiguous_shared_by" in skill
+    assert "wait for an explicit answer" in normalized
+    assert "candidate's exact canonical spelling" in normalized
+    assert "--allow-similar-shared-by" in skill
+    assert "explicitly says it is a different person" in normalized
+    assert "profile memory is not authoritative" in normalized
+    assert "never merge people automatically" in normalized
+    assert "rewrite historical entries" in normalized
+
+
+def test_curator_skill_uses_kids_as_explicit_tag_not_context() -> None:
+    skill = (ROOT / "skill-obsidian" / "SKILL.md").read_text().casefold()
+    normalized = " ".join(skill.split())
+
+    assert "`kids` is a tag, never a context value" in normalized
+    assert "context remains limited to `work` and `personal`" in normalized
+    assert "set `context=personal`" in normalized
+    assert "include the lowercase `kids` tag" in normalized
+    assert "user explicitly identifies a particular child" in normalized
+    assert "profile memory" in normalized
+    assert "webpage content" in normalized
+    assert "never hardcode child names" in normalized
+    assert "do not add `kids` automatically" in normalized
+    # Documentation uses generic placeholders and contains no example child identity.
+    assert "sarah" not in skill

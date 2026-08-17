@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -10,13 +11,15 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
+from metadata_consistency import normalize_shared_by_display
 from vault_ops import (
+    AmbiguousSharedByError,
     DuplicateURLError,
     RecoveryError,
     VaultError,
     ensure_vault_directory,
     normalize_http_url,
-    save_entry_locked,
+    save_consistent_entry_locked,
     vault_lock,
 )
 
@@ -46,7 +49,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--added", required=True, help="Date in YYYY-MM-DD form")
     parser.add_argument("--summary", required=True, help="Single-line entry summary")
     parser.add_argument("--shared-by", default=None, help="Optional person who shared the entry")
-    parser.add_argument("--context", choices=sorted(VALID_CONTEXTS), default=None)
+    parser.add_argument(
+        "--allow-similar-shared-by",
+        action="store_true",
+        help="Preserve this shared-by spelling after an explicit different-person decision",
+    )
+    parser.add_argument("--context", default=None)
     parser.add_argument("--note", default=None, help="Optional single-line note")
     parser.add_argument("--source", default=None, help="Optional single-line source")
     parser.add_argument("--status", default=None, help="Optional single-line status")
@@ -146,6 +154,14 @@ def validate_args(args: argparse.Namespace) -> tuple[argparse.Namespace, str]:
     args.tags = _validated_tags(args.tags)
     args.summary = _normalized_prose("Summary", args.summary, required=True)
     args.shared_by = _plain_single_line("Shared by", args.shared_by, reject_field_markers=True)
+    if args.shared_by is not None:
+        args.shared_by = normalize_shared_by_display(args.shared_by)
+        args.shared_by = _plain_single_line(
+            "Shared by", args.shared_by, reject_field_markers=True
+        )
+    args.context = _plain_single_line("Context", args.context)
+    if args.context is not None:
+        args.context = unicodedata.normalize("NFKC", args.context).strip().casefold()
     args.note = _normalized_prose("Note", args.note)
     args.source = _plain_single_line("Source", args.source)
     args.status = _plain_single_line("Status", args.status, reject_backticks=True)
@@ -153,7 +169,7 @@ def validate_args(args: argparse.Namespace) -> tuple[argparse.Namespace, str]:
     if args.type not in VALID_TYPES:
         raise ValueError(f"Type must be one of: {', '.join(sorted(VALID_TYPES))}")
     if args.context is not None and args.context not in VALID_CONTEXTS:
-        raise ValueError("Context must be work or personal")
+        raise ValueError(f"Context must be one of: {', '.join(sorted(VALID_CONTEXTS))}")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.added):
         raise ValueError("Added date must use YYYY-MM-DD")
     try:
@@ -192,12 +208,37 @@ def build_entry_block(args: argparse.Namespace) -> str:
 def main(argv: list[str] | None = None) -> int:
     try:
         args, normalized_url = validate_args(parse_args(argv))
-        entry_block = build_entry_block(args)
 
         # Filesystem work starts only after every user-controlled field is valid.
         ensure_vault_directory(VAULT)
         with vault_lock(VAULT):
-            daily, _ = save_entry_locked(VAULT, args.added, entry_block, normalized_url)
+            def build_with_shared_by(canonical_shared_by: str | None) -> str:
+                args.shared_by = canonical_shared_by
+                return build_entry_block(args)
+
+            daily, _ = save_consistent_entry_locked(
+                VAULT,
+                args.added,
+                normalized_url,
+                args.shared_by,
+                args.allow_similar_shared_by,
+                build_with_shared_by,
+            )
+    except AmbiguousSharedByError as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "ambiguous_shared_by",
+                    "provided": exc.provided,
+                    "candidates": exc.candidates,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
+        return 3
     except (ValueError, VaultError, OSError) as exc:
         prefix = "DUPLICATE" if isinstance(exc, DuplicateURLError) else "ERROR"
         print(f"{prefix}: {exc}", file=sys.stderr)

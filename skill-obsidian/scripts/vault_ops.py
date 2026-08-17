@@ -11,8 +11,14 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 from urllib.parse import urlsplit, urlunsplit
+
+from metadata_consistency import (
+    dated_note_shared_by_values,
+    exact_shared_by_variants,
+    ordered_similar_shared_by,
+)
 
 
 INDEX_HEADER = "# Index\n---\n"
@@ -33,6 +39,15 @@ class DuplicateURLError(VaultError):
 
 class RecoveryError(VaultError):
     """Raised when a pending transaction cannot be reconciled safely."""
+
+
+class AmbiguousSharedByError(VaultError):
+    """Raised when a shared-by value requires an explicit identity decision."""
+
+    def __init__(self, provided: str, candidates: list[str]) -> None:
+        super().__init__(f"ambiguous shared-by value {provided!r}")
+        self.provided = provided
+        self.candidates = candidates
 
 
 def normalize_http_url(value: str) -> str:
@@ -338,9 +353,10 @@ def recover_pending_locked(vault: Path) -> bool:
     return True
 
 
-def save_entry_locked(vault: Path, date: str, entry_block: str, normalized_url: str) -> tuple[Path, Path]:
-    """Save one entry while the caller holds the vault lock."""
-    recover_pending_locked(vault)
+def _save_entry_transaction_locked(
+    vault: Path, date: str, entry_block: str, normalized_url: str
+) -> tuple[Path, Path]:
+    """Commit one entry after the caller has acquired the lock and completed recovery."""
     duplicate_path = find_duplicate_url_locked(vault, normalized_url)
     if duplicate_path is not None:
         raise DuplicateURLError(f"URL already exists in {duplicate_path.name}: {normalized_url}")
@@ -371,6 +387,49 @@ def save_entry_locked(vault: Path, date: str, entry_block: str, normalized_url: 
     atomic_replace_text(index_path, index_after, str(journal["index_temp"]))
     _clear_completed_journal(vault, journal)
     return daily_path, index_path
+
+
+def save_entry_locked(vault: Path, date: str, entry_block: str, normalized_url: str) -> tuple[Path, Path]:
+    """Save one prebuilt entry while holding the lock, always recovering first."""
+    recover_pending_locked(vault)
+    return _save_entry_transaction_locked(vault, date, entry_block, normalized_url)
+
+
+def _canonical_shared_by_locked(
+    vault: Path, provided: str | None, allow_similar: bool
+) -> str | None:
+    """Resolve one display spelling while the caller holds the recovered vault lock."""
+    if provided is None:
+        return None
+
+    existing = dated_note_shared_by_values(vault)
+    exact_variants = exact_shared_by_variants(provided, existing)
+    if len(exact_variants) > 1:
+        raise AmbiguousSharedByError(provided, exact_variants)
+    if exact_variants:
+        return exact_variants[0]
+
+    similar = ordered_similar_shared_by(provided, existing)
+    if similar and not allow_similar:
+        raise AmbiguousSharedByError(provided, similar)
+    return provided
+
+
+def save_consistent_entry_locked(
+    vault: Path,
+    date: str,
+    normalized_url: str,
+    shared_by: str | None,
+    allow_similar_shared_by: bool,
+    entry_builder: Callable[[str | None], str],
+) -> tuple[Path, Path]:
+    """Recover, resolve archive metadata, build, and save while holding one lock."""
+    recover_pending_locked(vault)
+    canonical_shared_by = _canonical_shared_by_locked(
+        vault, shared_by, allow_similar_shared_by
+    )
+    entry_block = entry_builder(canonical_shared_by)
+    return _save_entry_transaction_locked(vault, date, entry_block, normalized_url)
 
 
 def _daily_entry_blocks(content: str) -> list[str]:

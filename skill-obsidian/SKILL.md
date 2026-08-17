@@ -72,6 +72,27 @@ Examples:
 - “Ibby sent me this for work” → `shared_by=Ibby`, `context=work`
 - “Archive this link” → omit both unless the framing clearly provides them
 
+### Links concerning the user's children
+
+`kids` is a tag, never a Context value. Context remains limited to `work` and
+`personal`.
+
+- When the user explicitly says a link is for or about their children, set
+  `context=personal` and include the lowercase `kids` tag alongside ordinary
+  topic tags.
+- If the user explicitly identifies a particular child, you may additionally
+  add that explicitly provided name as a normalized lowercase tag. The result
+  must still match the normal tag rules: lowercase ASCII letters or numbers,
+  with hyphens only between components.
+- If the user refers only to their children generally, use `kids` without a
+  child-specific name tag.
+- A general parenting topic belongs in `context=personal` and may use an
+  ordinary `parenting` topic tag, but it does not by itself establish that the
+  link concerns the user's children, so do not add `kids` automatically.
+- Never infer a child or child-specific tag from profile memory, existing
+  archive entries, webpage content, or unrelated personal information. Never
+  hardcode child names in this skill or elsewhere in the repository.
+
 ## Topic tags
 
 Tags describe the subject of a link; they do not repeat structured metadata. When generating tags automatically:
@@ -105,9 +126,37 @@ Both flags are optional. The dashboard displays them on entry cards and includes
 The script:
 1. Validates every supplied field before creating vault state
 2. Acquires the vault lock and reconciles any understood pending transaction
-3. Rejects normalized duplicate HTTP(S) URLs while still holding the lock
-4. Appends to the canonical daily note and prepends to `INDEX.md`
-5. Replaces each file atomically and clears the journal only after both are durable
+3. Reads canonical `Shared by` spellings from dated archive notes
+4. Reuses exact normalized spellings or rejects possible identity ambiguity
+5. Rejects normalized duplicate HTTP(S) URLs while still holding the lock
+6. Appends to the canonical daily note and prepends to `INDEX.md`
+7. Replaces each file atomically and clears the journal only after both are durable
+
+### Ambiguous `Shared by` names
+
+The dated archive notes are the source of truth for canonical `Shared by`
+spellings. Profile memory is not authoritative. Run the normal save command
+first. If `save_entry.py` exits with code 3 and emits JSON whose `error` is
+`ambiguous_shared_by`:
+
+1. Read the `provided` value and every item in `candidates`.
+2. Ask the user whether the provided name refers to one of those existing
+   people, then wait for an explicit answer.
+3. For one candidate, ask concisely using this exact pattern:
+   “I found an existing person named ‘<candidate>’. Is ‘<provided>’ the same
+   person?”
+4. For several candidates, list them all and ask the user to select one or say
+   that the provided name is a different person.
+5. If the user confirms a candidate, retry using that candidate's exact
+   canonical spelling with `--shared-by`.
+6. If the user explicitly says it is a different person, retry once with the
+   original provided spelling and `--allow-similar-shared-by`.
+
+Never infer identity from webpage content, profile memory, spelling similarity,
+or unrelated personal information. Never merge people automatically, rewrite
+historical entries, or repeatedly retry the override without the user's
+explicit different-person decision. `save_entry.py` is non-interactive; Hermes,
+not the script, handles this confirmation conversation.
 
 > **⚠️ Prepend bug (fixed):** Old versions of `save_entry.py` inserted new entries BETWEEN the header and the first `---`. When two entries from the same day were saved consecutively, they ended up in the same chunk. The dashboard parser uses `re.findall(r'\*\*URL\*\*', chunk)[0]` — only the first URL per chunk was read. Symptoms: entry appears in INDEX.md but not in dashboard (or dashboard shows fewer entries than vault count). Fix was to change `lines[:sep_idx]` → `lines[:sep_idx+1]` so insertion happens AFTER the separator, not before. Run `rebuild_index.py` to fix retroactively affected vaults.
 

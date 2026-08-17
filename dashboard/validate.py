@@ -1,11 +1,52 @@
 """Validation utilities for link curator entries."""
 from __future__ import annotations
 
+import importlib.util
+import itertools
 import re
+import sys
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
+
+
+def _metadata_helper_candidates(validate_file: Path) -> tuple[Path, Path]:
+    dashboard_directory = validate_file.resolve().parent
+    profile_or_repository = dashboard_directory.parent
+    return (
+        profile_or_repository / "skill-obsidian" / "scripts" / "metadata_consistency.py",
+        profile_or_repository
+        / "skills"
+        / "note-taking"
+        / "obsidian"
+        / "scripts"
+        / "metadata_consistency.py",
+    )
+
+
+def _load_metadata_consistency(validate_file: Path | None = None):
+    """Load the helper from one of the two reviewed repository/profile layouts."""
+    source = Path(__file__) if validate_file is None else validate_file
+    candidates = _metadata_helper_candidates(source)
+    for candidate in candidates:
+        if not candidate.is_file() or candidate.is_symlink():
+            continue
+        module_name = "_hermes_link_curator_metadata_consistency"
+        spec = importlib.util.spec_from_file_location(module_name, candidate)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"could not load metadata consistency helper at {candidate}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    expected = " or ".join(str(candidate) for candidate in candidates)
+    raise RuntimeError(
+        "metadata consistency helper is missing; expected a regular non-symlink file at "
+        f"{expected}"
+    )
+
+
+metadata_consistency = _load_metadata_consistency()
 
 
 @dataclass
@@ -154,7 +195,6 @@ def validate_vault(vault_path: str = None) -> dict:
     Returns a report dict.
     """
     from pathlib import Path
-    import sys
     sys.path.insert(0, str(Path(__file__).parent))
 
     if vault_path is None:
@@ -169,6 +209,8 @@ def validate_vault(vault_path: str = None) -> dict:
         "warnings": 0,
         "broken": [],
         "warnings_list": [],
+        "metadata_errors": [],
+        "metadata_warnings": [],
     }
 
     if not index_path.exists():
@@ -179,7 +221,7 @@ def validate_vault(vault_path: str = None) -> dict:
     chunks = re.split(r'\n---\n', content)
 
     # Import parser
-    from archive import _parse_entry, get_all_entries
+    from archive import _parse_entry
 
     for i, chunk in enumerate(chunks):
         if not re.search(r'\*\*URL\*\*', chunk):
@@ -213,6 +255,30 @@ def validate_vault(vault_path: str = None) -> dict:
             for w in val.warnings:
                 results["warnings_list"].append({"title": title, "warning": w})
 
+    # Cross-entry identity checks use canonical dated notes only. INDEX.md is
+    # intentionally excluded so mirrored entries are never counted twice.
+    shared_by_values = sorted(set(metadata_consistency.dated_note_shared_by_values(vault)))
+    for left, right in itertools.combinations(shared_by_values, 2):
+        left_key = metadata_consistency.shared_by_key(left)
+        right_key = metadata_consistency.shared_by_key(right)
+        names = [left, right]
+        if left_key == right_key:
+            results["metadata_errors"].append({
+                "names": names,
+                "error": (
+                    "Exact normalized shared_by spelling inconsistency: "
+                    f"{left!r} and {right!r}"
+                ),
+            })
+        elif metadata_consistency.are_similar_shared_by(left, right):
+            results["metadata_warnings"].append({
+                "names": names,
+                "warning": (
+                    f"Possible similar shared_by people: {left!r} and {right!r}; "
+                    "review them manually"
+                ),
+            })
+
     return results
 
 
@@ -244,5 +310,18 @@ if __name__ == "__main__":
                 print(f"  - {item['title']}: {item['warning']}")
                 seen.add(key)
 
-    if not report.get("broken") and not report.get("warnings_list"):
+    if report.get("metadata_errors"):
+        print(f"\n=== METADATA ERRORS ({len(report['metadata_errors'])}) ===")
+        for item in report["metadata_errors"]:
+            print(f"  ERROR: {item['error']}")
+
+    if report.get("metadata_warnings"):
+        print(f"\n=== METADATA WARNINGS ({len(report['metadata_warnings'])}) ===")
+        for item in report["metadata_warnings"]:
+            print(f"  WARNING: {item['warning']}")
+
+    if not any(
+        report.get(key)
+        for key in ("broken", "warnings_list", "metadata_errors", "metadata_warnings")
+    ):
         print("\nAll entries are well-formed.")

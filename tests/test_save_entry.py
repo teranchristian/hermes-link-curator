@@ -4,6 +4,8 @@ import os
 import json
 import importlib
 import fcntl
+import hashlib
+import inspect
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -108,13 +110,215 @@ def test_invalid_shared_by_is_rejected_before_writes(tmp_path: Path, value: str)
     assert not vault.exists()
 
 
-def test_invalid_context_is_rejected_before_writes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("value", ["persnal", "business", "home", "kids"])
+def test_invalid_context_is_rejected_before_writes(tmp_path: Path, value: str) -> None:
     vault = tmp_path / "vault"
 
-    result = run_save(vault, "--context", "Work")
+    result = run_save(vault, "--context", value)
 
     assert result.returncode != 0
-    assert "invalid choice" in result.stderr
+    assert "personal" in result.stderr
+    assert "work" in result.stderr
+    assert not vault.exists()
+
+
+@pytest.mark.parametrize(
+    ("provided", "stored"),
+    [
+        ("Work", "work"),
+        ("WORK", "work"),
+        ("  work  ", "work"),
+        ("Personal", "personal"),
+        ("PERSONAL", "personal"),
+        ("  personal  ", "personal"),
+    ],
+)
+def test_context_is_normalized_to_canonical_value(
+    tmp_path: Path, provided: str, stored: str
+) -> None:
+    vault = tmp_path / "vault"
+
+    result = run_save(vault, "--context", provided)
+
+    assert result.returncode == 0, result.stderr
+    assert f"- **Context**: `{stored}`" in (vault / "INDEX.md").read_text()
+
+
+@pytest.mark.parametrize("provided", ["ibby", "IBBY", "  Ibby  "])
+def test_exact_shared_by_match_reuses_archive_canonical_spelling(
+    tmp_path: Path, provided: str
+) -> None:
+    vault = tmp_path / "vault"
+    assert run_save(vault, "--shared-by", "Ibby").returncode == 0
+
+    result = run_save(
+        vault,
+        "--shared-by",
+        provided,
+        url="https://example.com/second",
+        title="Second entry",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (vault / "INDEX.md").read_text().count("- **Shared by**: Ibby\n") == 2
+
+
+def test_shared_by_internal_whitespace_and_nfkc_reuse_canonical_spelling(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    assert run_save(vault, "--shared-by", "Mary Jane").returncode == 0
+    assert run_save(
+        vault,
+        "--shared-by",
+        "  Mary   Jane  ",
+        url="https://example.com/two",
+        title="Whitespace",
+    ).returncode == 0
+    assert run_save(
+        vault,
+        "--shared-by",
+        "ＭＡＲＹ　ＪＡＮＥ",
+        url="https://example.com/three",
+        title="Unicode",
+    ).returncode == 0
+
+    content = (vault / "INDEX.md").read_text()
+    assert content.count("- **Shared by**: Mary Jane\n") == 3
+
+
+def test_fuzzy_override_does_not_bypass_exact_canonicalization(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    assert run_save(vault, "--shared-by", "Ibby").returncode == 0
+
+    result = run_save(
+        vault,
+        "--shared-by",
+        "ibby",
+        "--allow-similar-shared-by",
+        url="https://example.com/second",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (vault / "INDEX.md").read_text().count("- **Shared by**: Ibby\n") == 2
+
+
+def test_similar_shared_by_returns_stable_structured_ambiguity_without_writes(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    assert run_save(vault, "--shared-by", "Ibby").returncode == 0
+    markdown_before = {path.name: path.read_bytes() for path in vault.glob("*.md")}
+    hashes_before = {
+        name: hashlib.sha256(content).hexdigest() for name, content in markdown_before.items()
+    }
+
+    result = run_save(
+        vault,
+        "--shared-by",
+        "Iby",
+        url="https://example.com/second",
+        title="Ambiguous",
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert json.loads(result.stderr) == {
+        "ok": False,
+        "error": "ambiguous_shared_by",
+        "provided": "Iby",
+        "candidates": ["Ibby"],
+    }
+    assert list(json.loads(result.stderr)) == ["ok", "error", "provided", "candidates"]
+    assert "Traceback" not in result.stderr
+    markdown_after = {path.name: path.read_bytes() for path in vault.glob("*.md")}
+    assert markdown_after == markdown_before
+    assert {
+        name: hashlib.sha256(content).hexdigest() for name, content in markdown_after.items()
+    } == hashes_before
+    assert not (vault / ".link-curator-transaction.json").exists()
+    assert not list(vault.glob(".*.tmp"))
+
+
+def test_multiple_similar_candidates_are_ranked_and_deduplicated(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    assert run_save(vault, "--shared-by", "Abby").returncode == 0
+    assert run_save(
+        vault,
+        "--shared-by",
+        "Abby",
+        url="https://example.com/abby-two",
+    ).returncode == 0
+    assert run_save(
+        vault,
+        "--shared-by",
+        "Amy",
+        url="https://example.com/amy",
+    ).returncode == 0
+
+    result = run_save(vault, "--shared-by", "Aby", url="https://example.com/ambiguous")
+
+    assert result.returncode == 3
+    assert json.loads(result.stderr)["candidates"] == ["Abby", "Amy"]
+
+
+def test_similarity_detects_john_and_jon_but_not_genuinely_different_names(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    assert run_save(vault, "--shared-by", "John").returncode == 0
+
+    jon = run_save(vault, "--shared-by", "Jon", url="https://example.com/jon")
+    alice = run_save(vault, "--shared-by", "Alice", url="https://example.com/alice")
+
+    assert jon.returncode == 3
+    assert json.loads(jon.stderr)["candidates"] == ["John"]
+    assert alice.returncode == 0, alice.stderr
+
+
+def test_existing_exact_normalized_variants_are_actionable_ambiguity(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    first = expected_entry("- **Shared by**: Ibby", url="https://example.com/one", title="One")
+    second = expected_entry("- **Shared by**: ibby", url="https://example.com/two", title="Two")
+    (vault / f"{DATE}.md").write_text(f"# {DATE}\n\n{first}\n---\n{second}\n---\n")
+    (vault / "INDEX.md").write_text(f"# Index\n---\n{second}\n---\n{first}\n---\n")
+
+    result = run_save(vault, "--shared-by", "IBBY", url="https://example.com/three")
+
+    assert result.returncode == 3
+    assert json.loads(result.stderr)["candidates"] == ["Ibby", "ibby"]
+
+
+def test_explicit_similar_override_is_one_save_only(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    assert run_save(vault, "--shared-by", "Ibby").returncode == 0
+
+    override = run_save(
+        vault,
+        "--shared-by",
+        "Iby",
+        "--allow-similar-shared-by",
+        url="https://example.com/iby",
+    )
+    later = run_save(vault, "--shared-by", "Ibbi", url="https://example.com/later")
+
+    assert override.returncode == 0, override.stderr
+    content = (vault / "INDEX.md").read_text()
+    assert "- **Shared by**: Ibby\n" in content
+    assert "- **Shared by**: Iby\n" in content
+    assert later.returncode == 3
+
+
+def test_override_does_not_bypass_shared_by_safety(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    result = run_save(
+        vault,
+        "--shared-by",
+        "Iby\n- **Context**: `work`",
+        "--allow-similar-shared-by",
+    )
+    assert result.returncode == 1
     assert not vault.exists()
 
 
@@ -179,6 +383,31 @@ def test_two_concurrent_duplicate_saves_store_exactly_one(tmp_path: Path) -> Non
     assert "DUPLICATE" in next(result.stderr for result in results if result.returncode)
     for filename in (f"{DATE}.md", "INDEX.md"):
         assert (vault / filename).read_text().count("https://example.com") == 1
+
+
+def test_concurrent_similar_names_cannot_both_save_without_override(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda item: run_save(
+                    vault,
+                    "--shared-by",
+                    item[2],
+                    url=item[0],
+                    title=item[1],
+                ),
+                [
+                    ("https://example.com/ibby", "Ibby entry", "Ibby"),
+                    ("https://example.com/iby", "Iby entry", "Iby"),
+                ],
+            )
+        )
+
+    assert sorted(result.returncode for result in results) == [0, 3]
+    for filename in (f"{DATE}.md", "INDEX.md"):
+        content = (vault / filename).read_text()
+        assert content.count("- **Shared by**:") == 1
 
 
 def test_duplicate_does_not_modify_markdown_files(tmp_path: Path) -> None:
@@ -252,7 +481,66 @@ def test_lock_covers_duplicate_check_and_both_markdown_replacements(
     assert observed == ["duplicate", f"{DATE}.md", "INDEX.md"]
 
 
-def simulate_interruption(monkeypatch: pytest.MonkeyPatch, vault: Path, fail_target: str):
+def test_shared_by_scan_occurs_under_lock_after_recovery_before_duplicate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    vault_ops, save_entry = load_save_modules(monkeypatch, vault)
+    observed: list[str] = []
+    original_recover = vault_ops.recover_pending_locked
+    original_scan = vault_ops.dated_note_shared_by_values
+    original_duplicate = vault_ops.find_duplicate_url_locked
+
+    def checked_recover(*args, **kwargs):
+        assert_lock_is_held(vault_ops, vault)
+        observed.append("recover")
+        return original_recover(*args, **kwargs)
+
+    def checked_scan(*args, **kwargs):
+        assert_lock_is_held(vault_ops, vault)
+        observed.append("scan")
+        return original_scan(*args, **kwargs)
+
+    def checked_duplicate(*args, **kwargs):
+        assert_lock_is_held(vault_ops, vault)
+        observed.append("duplicate")
+        return original_duplicate(*args, **kwargs)
+
+    monkeypatch.setattr(vault_ops, "recover_pending_locked", checked_recover)
+    monkeypatch.setattr(vault_ops, "dated_note_shared_by_values", checked_scan)
+    monkeypatch.setattr(vault_ops, "find_duplicate_url_locked", checked_duplicate)
+
+    assert save_entry.main(default_argv("--shared-by", "Ibby")) == 0
+    assert observed == ["recover", "scan", "duplicate"]
+
+
+def test_public_locked_save_has_no_recovery_bypass_and_always_recovers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    vault_ops, save_entry = load_save_modules(monkeypatch, vault)
+    calls: list[str] = []
+    original_recover = vault_ops.recover_pending_locked
+
+    def checked_recover(*args, **kwargs):
+        calls.append("recover")
+        return original_recover(*args, **kwargs)
+
+    monkeypatch.setattr(vault_ops, "recover_pending_locked", checked_recover)
+    parameters = inspect.signature(vault_ops.save_entry_locked).parameters
+    assert not {"skip_recovery", "recovery_done", "recover"} & set(parameters)
+
+    args, normalized_url = save_entry.validate_args(save_entry.parse_args(default_argv()))
+    entry_block = save_entry.build_entry_block(args)
+    with vault_ops.vault_lock(vault):
+        vault_ops.save_entry_locked(vault, DATE, entry_block, normalized_url)
+    assert calls == ["recover"]
+
+
+def simulate_interruption(
+    monkeypatch: pytest.MonkeyPatch, vault: Path, fail_target: str, *argv_extra: str
+):
     vault_ops, save_entry = load_save_modules(monkeypatch, vault)
     original_replace = vault_ops.atomic_replace_text
 
@@ -262,7 +550,7 @@ def simulate_interruption(monkeypatch: pytest.MonkeyPatch, vault: Path, fail_tar
         return original_replace(target, *args, **kwargs)
 
     monkeypatch.setattr(vault_ops, "atomic_replace_text", interrupted)
-    assert save_entry.main(default_argv()) == 1
+    assert save_entry.main(default_argv(*argv_extra)) == 1
     monkeypatch.setattr(vault_ops, "atomic_replace_text", original_replace)
     return vault_ops, save_entry
 
@@ -295,6 +583,24 @@ def test_failure_after_daily_replacement_repairs_only_pending_index_entry(
     assert (vault / f"{DATE}.md").read_bytes() == daily_before
     assert (vault / "INDEX.md").read_text().count("https://example.com") == 1
     assert not (vault / vault_ops.JOURNAL_NAME).exists()
+
+
+def test_recovery_completes_before_new_shared_by_ambiguity_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    vault_ops, _ = simulate_interruption(
+        monkeypatch, vault, "INDEX.md", "--shared-by", "Ibby"
+    )
+
+    result = run_save(vault, "--shared-by", "Iby", url="https://example.com/second")
+
+    assert result.returncode == 3
+    assert not (vault / vault_ops.JOURNAL_NAME).exists()
+    for filename in (f"{DATE}.md", "INDEX.md"):
+        content = (vault / filename).read_text()
+        assert content.count("https://example.com") == 1
+        assert "https://example.com/second" not in content
 
 
 def test_recovery_repairs_index_only_state(
