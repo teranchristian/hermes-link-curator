@@ -1,0 +1,42 @@
+{% macro entry_card(entry) %}
+<article class="entry-card is-collapsed" data-entry-card>
+  <div class="entry-meta">
+    <span class="entry-type">{{ entry.entry_type }}</span>
+    {% if entry.context %}<span class="entry-context">{{ entry.context|title }}</span>{% endif %}
+    {% if entry.shared_by %}
+    <span class="entry-sender">
+      <span class="sender-initial" aria-hidden="true">{{ entry.shared_by|sender_initial }}</span>
+      <span>Shared by {{ entry.shared_by }}</span>
+    </span>
+    {% endif %}
+  </div>
+  <p class="entry-title">
+    {% if entry.clickable_url %}<a href="{{ entry.clickable_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()">{{ entry.title }}</a>{% else %}{{ entry.title }}{% endif %}
+  </p>
+  {% if entry.summary %}
+  <p class="entry-summary entry-collapsed-summary">{{ entry.summary|collapsed_summary }}</p>
+  <p class="entry-summary entry-full-summary">{{ entry.summary }}</p>
+  {% endif %}
+  {% if entry.tags %}
+  <div class="entry-tags">
+    {% for tag in entry.tags %}
+    <a href="/tag/{{ tag.lstrip('#')|urlencode }}" class="entry-tag{% if loop.index > 2 %} mobile-tag-hidden{% endif %}" onclick="event.stopPropagation()">{{ tag }}</a>
+    {% endfor %}
+    {% if entry.tags|length > 2 %}<span class="mobile-tag-overflow">+{{ entry.tags|length - 2 }}</span>{% endif %}
+  </div>
+  {% endif %}
+</article>
+{% endmacro %}
+
+{% macro pagination_nav(pagination, label='Result pages') %}
+{% if pagination.total_results %}
+<div class="pagination-bar">
+  <p class="pagination-summary">Showing {{ pagination.first_result }}–{{ pagination.last_result }} of {{ pagination.total_results }}</p>
+  <nav class="pagination-nav" aria-label="{{ label }}">
+    {% if pagination.has_previous %}<a href="{{ pagination.previous_url }}" rel="prev">Previous</a>{% endif %}
+    <span>Page {{ pagination.page }} of {{ pagination.total_pages }}</span>
+    {% if pagination.has_next %}<a href="{{ pagination.next_url }}" rel="next">Next</a>{% endif %}
+  </nav>
+</div>
+{% endif %}
+{% endmacro %}

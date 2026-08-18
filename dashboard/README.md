@@ -13,6 +13,19 @@ FastAPI app that serves a read-only Obsidian-style web UI over a markdown vault.
 - **Stats** (`/stats`) — JSON: total entries, days, type counts, top tags
 - **Health** (`/health`) — JSON: server status + entry count
 
+## Archive pagination
+
+The list, search, and tag pages render 50 entries per page. Search and metadata
+filters are applied to the complete archive before totals and page slices are
+calculated, and Previous/Next links preserve the active query and filter values.
+Changing or submitting a filter starts again at page 1.
+
+The main list groups each selected page slice by date. If one date spans a page
+boundary, its date heading appears on both pages without duplicating entries.
+Pagination limits rendered cards and browser DOM size only: the Markdown archive
+is still parsed in memory so filtering and totals include every matching entry,
+and every match remains reachable through the page links.
+
 ## How it finds the vault
 
 Auto-discovery: the script computes the vault path as `<this-file>/../../vault`. So if you copy the dashboard to `<profile-dir>/dashboard/`, the vault is automatically `<profile-dir>/vault/`.
@@ -23,8 +36,16 @@ Override with `$HERMES_ARCHIVE_VAULT` if the vault lives somewhere else.
 
 ```bash
 ./start.sh 8090
-# → open http://localhost:8090
+# → open http://127.0.0.1:8090
 ```
+
+The dashboard defaults to loopback and has no authentication. A non-loopback
+`ARCHIVE_HOST` is rejected unless `ARCHIVE_ALLOW_REMOTE_BIND=1` is also set.
+Keep it on loopback and use an SSH tunnel or an existing authenticated proxy for
+remote access rather than exposing it directly.
+
+All application scripts, styles, and fonts are local; D3 7.9.0 is vendored under
+`static/vendor/`.
 
 ## Validate the vault
 
@@ -32,7 +53,13 @@ Override with `$HERMES_ARCHIVE_VAULT` if the vault lives somewhere else.
 python3 validate.py
 ```
 
-Checks every entry in `INDEX.md` for missing fields, malformed dates, double-`---` separators, and other parse-breaking issues. Run this from inside the dashboard directory.
+Checks every entry in `INDEX.md` for missing fields, malformed dates,
+double-`---` separators, and other parse-breaking issues. It also reads canonical
+dated notes to report `Shared by` values that differ only by normalization and
+possible one-edit spelling variants. `INDEX.md` is deliberately excluded from
+those cross-entry name comparisons so mirrored entries are not counted twice.
+Validation reports issues without rewriting or merging archive entries. Run this
+from inside the dashboard directory.
 
 ## Caching
 

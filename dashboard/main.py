@@ -3,13 +3,28 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Annotated
+from urllib.parse import quote, urlencode
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from archive import get_all_entries, get_entries_by_date, get_tags, search_entries, clear_cache, get_graph_data
+from archive import (
+    clear_cache,
+    collapsed_summary,
+    filter_entries,
+    get_all_entries,
+    get_entries_by_date,
+    get_filter_options,
+    get_graph_data,
+    get_tags,
+    group_entries_by_date,
+    newest_first,
+    paginate_entries,
+    sender_initial,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 # Auto-discover vault path:
@@ -23,12 +38,178 @@ VAULT_PATH = os.environ.get(
 PORT = int(os.environ.get("ARCHIVE_PORT", "8090"))
 HOST = os.environ.get("ARCHIVE_HOST", "127.0.0.1")
 
+
+def validate_bind_host(host: str, allow_remote: str | None = None) -> str:
+    """Reject accidental network exposure unless it is explicitly enabled."""
+    normalized = host.strip().casefold()
+    if normalized in {"127.0.0.1", "localhost", "::1"}:
+        return host.strip()
+    if allow_remote == "1":
+        return host.strip()
+    raise RuntimeError(
+        f"refusing non-loopback ARCHIVE_HOST={host!r}; set ARCHIVE_ALLOW_REMOTE_BIND=1 "
+        "only if you intentionally accept unauthenticated remote access"
+    )
+
+
+HOST = validate_bind_host(HOST, os.environ.get("ARCHIVE_ALLOW_REMOTE_BIND"))
+
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+templates.env.filters["collapsed_summary"] = collapsed_summary
+templates.env.filters["sender_initial"] = sender_initial
+
+FILTER_KEYS = ("q", "context", "shared_by", "tag", "type")
 
 
 def build_tags_context() -> dict:
     """Shared tags context for all pages."""
-    return {"tags": get_tags()[:30]}
+    tags = get_tags()
+    return {"tags": tags, "top_topics": tags[:3]}
+
+
+def _query_url(path: str, values: dict[str, str]) -> str:
+    query = urlencode([(key, values[key]) for key in FILTER_KEYS if values.get(key)])
+    return f"{path}?{query}" if query else path
+
+
+def _page_url(path: str, values: dict[str, str], page: int) -> str:
+    """Build an encoded page link from canonical single-value filter state."""
+    pairs = [(key, values[key]) for key in FILTER_KEYS if values.get(key)]
+    pairs.append(("page", str(page)))
+    return f"{path}?{urlencode(pairs)}"
+
+
+def build_dashboard_context(
+    path: str,
+    *,
+    page: int = 1,
+    q: str = "",
+    context: str = "",
+    shared_by: str = "",
+    tag: str = "",
+    entry_type: str = "",
+    fixed_tag: str = "",
+) -> dict:
+    """Filter the complete archive, then paginate it and build shared UI state."""
+    selected = {
+        "q": q.strip(),
+        "context": context.strip(),
+        "shared_by": shared_by.strip(),
+        "tag": tag.strip(),
+        "type": entry_type.strip(),
+    }
+    filtered_entries = filter_entries(
+        get_all_entries(),
+        query=selected["q"],
+        context=selected["context"],
+        shared_by=selected["shared_by"],
+        tag=fixed_tag or selected["tag"],
+        entry_type=selected["type"],
+    )
+    ordered_entries = newest_first(filtered_entries)
+    try:
+        pagination_page = paginate_entries(ordered_entries, page)
+    except IndexError:
+        raise HTTPException(status_code=404, detail=f"Page {page} is out of range") from None
+
+    entries = pagination_page.entries
+    options = get_filter_options()
+    selected_context = selected["context"].casefold()
+    selected_sender = selected["shared_by"].casefold()
+    selected_tag = selected["tag"].lstrip("#").casefold()
+    selected_type = selected["type"].casefold()
+    people_has_selection = any(
+        name.casefold() == selected_sender for name, _ in options["people"]
+    )
+    topic_has_selection = any(
+        name.lstrip("#").casefold() == selected_tag for name, _ in options["tags"]
+    )
+    type_has_selection = any(
+        name.casefold() == selected_type for name, _ in options["types"]
+    )
+
+    active_filters = []
+    labels = {
+        "q": "Search",
+        "context": "Context",
+        "shared_by": "Shared by",
+        "tag": "Topic",
+        "type": "Type",
+    }
+    for key in FILTER_KEYS:
+        if not selected[key]:
+            continue
+        remaining = dict(selected)
+        remaining[key] = ""
+        active_filters.append({
+            "key": key,
+            "label": labels[key],
+            "value": selected[key],
+            "remove_url": _query_url(path, remaining),
+        })
+
+    top_topics = []
+    for topic, count in options["tags"][:3]:
+        topic_filters = dict(selected)
+        topic_filters["tag"] = topic
+        top_topics.append({
+            "name": topic,
+            "count": count,
+            "url": _query_url(path, topic_filters),
+            "active": topic.lstrip("#").casefold() == selected_tag,
+        })
+
+    pagination = {
+        "page": pagination_page.page,
+        "page_size": pagination_page.page_size,
+        "total_results": pagination_page.total_results,
+        "total_pages": pagination_page.total_pages,
+        "first_result": pagination_page.first_result,
+        "last_result": pagination_page.last_result,
+        "has_previous": pagination_page.previous_page is not None,
+        "has_next": pagination_page.next_page is not None,
+        "previous_url": (
+            _page_url(path, selected, pagination_page.previous_page)
+            if pagination_page.previous_page is not None
+            else None
+        ),
+        "next_url": (
+            _page_url(path, selected, pagination_page.next_page)
+            if pagination_page.next_page is not None
+            else None
+        ),
+    }
+
+    return {
+        "entries": entries,
+        "days": group_entries_by_date(entries),
+        "results": entries,
+        "result_count": pagination_page.total_results,
+        "pagination": pagination,
+        "query": selected["q"],
+        "selected": selected,
+        "selected_context": selected_context,
+        "people_has_selection": people_has_selection,
+        "topic_has_selection": topic_has_selection,
+        "type_has_selection": type_has_selection,
+        "people_options": [
+            (name, count, name.casefold() == selected_sender)
+            for name, count in options["people"]
+        ],
+        "topic_options": [
+            (name, count, name.lstrip("#").casefold() == selected_tag)
+            for name, count in options["tags"]
+        ],
+        "type_options": [
+            (name, count, name.casefold() == selected_type)
+            for name, count in options["types"]
+        ],
+        "top_topics": top_topics,
+        "active_filters": active_filters,
+        "has_active_filters": bool(active_filters),
+        "filter_action": path,
+        "clear_filters_url": path,
+    }
 
 
 # ─── FastAPI app ─────────────────────────────────────────────────────────────
@@ -41,17 +222,27 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 # ─── Routes ─────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request) -> HTMLResponse:
-    days = get_entries_by_date()
+async def home(
+    request: Request,
+    q: str = "",
+    context: str = "",
+    shared_by: str = "",
+    tag: str = "",
+    type: str = "",
+    page: Annotated[int, Query(ge=1)] = 1,
+) -> HTMLResponse:
+    dashboard = build_dashboard_context(
+        "/", page=page, q=q, context=context, shared_by=shared_by, tag=tag, entry_type=type
+    )
+    all_days = get_entries_by_date()
     ctx = {
         "request": request,
         "page_title": "Archive",
         "current_page": "archive-list",
         "total_entries": len(get_all_entries()),
-        "total_days": len(days),
+        "total_days": len(all_days),
         "generated_at": "",
-        "days": days,
-        **build_tags_context(),
+        **dashboard,
     }
     return templates.TemplateResponse(request=request, name="index.html", context=ctx)
 
@@ -76,13 +267,24 @@ async def calendar(request: Request) -> HTMLResponse:
 
 
 @app.get("/search", response_class=HTMLResponse)
-async def search(request: Request, q: str = "") -> HTMLResponse:
-    query = q.strip()
-    if query:
-        results = search_entries(query)
-    else:
-        results = get_all_entries()[:50]
-
+async def search(
+    request: Request,
+    q: str = "",
+    context: str = "",
+    shared_by: str = "",
+    tag: str = "",
+    type: str = "",
+    page: Annotated[int, Query(ge=1)] = 1,
+) -> HTMLResponse:
+    dashboard = build_dashboard_context(
+        "/search",
+        page=page,
+        q=q,
+        context=context,
+        shared_by=shared_by,
+        tag=tag,
+        entry_type=type,
+    )
     ctx = {
         "request": request,
         "page_title": "Archive - Search",
@@ -90,17 +292,32 @@ async def search(request: Request, q: str = "") -> HTMLResponse:
         "total_entries": len(get_all_entries()),
         "total_days": len(get_entries_by_date()),
         "generated_at": "",
-        "results": results,
-        "query": query,
-        "is_search": bool(query),
-        **build_tags_context(),
+        "is_search": bool(dashboard["active_filters"]),
+        **dashboard,
     }
     return templates.TemplateResponse(request=request, name="search.html", context=ctx)
 
 
 @app.get("/tag/{tag}", response_class=HTMLResponse)
-async def by_tag(request: Request, tag: str) -> HTMLResponse:
-    entries = search_entries(f"#{tag}")
+async def by_tag(
+    request: Request,
+    tag: str,
+    q: str = "",
+    context: str = "",
+    shared_by: str = "",
+    type: str = "",
+    page: Annotated[int, Query(ge=1)] = 1,
+) -> HTMLResponse:
+    path = f"/tag/{quote(tag, safe='')}"
+    dashboard = build_dashboard_context(
+        path,
+        page=page,
+        q=q,
+        context=context,
+        shared_by=shared_by,
+        entry_type=type,
+        fixed_tag=tag,
+    )
     ctx = {
         "request": request,
         "page_title": f"Archive - #{tag}",
@@ -109,7 +326,9 @@ async def by_tag(request: Request, tag: str) -> HTMLResponse:
         "total_days": len(get_entries_by_date()),
         "generated_at": "",
         "tag": tag,
-        "tag_entries": entries,
+        "tag_entries": dashboard["entries"],
+        "result_count": dashboard["result_count"],
+        "pagination": dashboard["pagination"],
         **build_tags_context(),
     }
     return templates.TemplateResponse(request=request, name="tag.html", context=ctx)
@@ -148,6 +367,8 @@ async def day_json(date: str) -> JSONResponse:
             "entry_type": e.entry_type,
             "summary": e.summary,
             "tags": e.tags,
+            "shared_by": e.shared_by,
+            "context": e.context,
         }
         for e in day_data.entries
     ])
@@ -158,12 +379,16 @@ async def stats() -> JSONResponse:
     entries = get_all_entries()
     tags = get_tags()
     type_counts: dict[str, int] = {}
+    context_counts: dict[str, int] = {}
     for e in entries:
         type_counts[e.entry_type] = type_counts.get(e.entry_type, 0) + 1
+        if e.context in {"work", "personal"}:
+            context_counts[e.context] = context_counts.get(e.context, 0) + 1
     return JSONResponse({
         "total": len(entries),
         "days": len(set(e.added for e in entries)),
         "by_type": type_counts,
+        "by_context": context_counts,
         "top_tags": tags[:15],
     })
 

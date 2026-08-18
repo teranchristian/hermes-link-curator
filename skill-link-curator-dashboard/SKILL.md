@@ -55,12 +55,41 @@ readlink /proc/<pid>/cwd
 | `GET /stats` | Tag counts, date distribution |
 | `GET /reload-cache` | Force-clear and reload vault cache |
 | `GET /calendar` | Calendar view |
-| `GET /search?q=...` | Search entries |
+| `GET /search?q=...` | Search and filter entries |
 | `GET /tag/{tag}` | Entries for a specific tag |
 | `GET /day/YYYY-MM-DD` | Entries for a specific day |
 | `GET /day-json/YYYY-MM-DD` | JSON feed for a day |
 | `GET /graph` | Force-directed graph view (HTML + D3.js) |
 | `GET /graph-json` | Graph dataset as `{nodes, links}` JSON |
+
+## Optional entry metadata
+
+Support these optional canonical lines anywhere in an entry:
+
+```markdown
+- **Shared by**: Ibby
+- **Context**: `work`
+```
+
+Context is exactly `work` or `personal`. Missing metadata is valid. Every collapsed card displays available Context and `Shared by <name>` metadata, including a text-only circular sender initial. Omit either element cleanly when absent. Search both fields. `/day-json` and graph entry nodes expose stable `shared_by` and `context` keys; `/stats` exposes `by_context`.
+
+Never guess `Shared by`; use it only when the user names the person. Set or infer Context only from unambiguous framing: QSIC, Jira, pull requests, or employment tasks → `work`; family, travel, hobbies, or personal activities → `personal`. A technical article alone is not work context. If unclear, omit it and do not interrupt archiving to ask.
+
+## Filtering and responsive cards
+
+The list and search pages accept `q`, `context`, `shared_by`, `tag`, and `type` query parameters. Structured filters are independent, combinable, exact, and case-insensitive; `q` remains a case-insensitive substring search across the supported fields. Forms must preserve the other active parameters. Unknown values return an empty result set. Clear/reset actions remove every search and filter parameter.
+
+The list, search, and tag routes use server-side pagination with a fixed 50-entry page size. Apply all search and metadata filters to the complete parsed archive before calculating totals or selecting a page. Previous/Next links preserve active filters, while filter submissions reset to page 1. The list groups only the selected slice by date, so a date may have a heading on consecutive pages without duplicating an entry. Pagination limits rendered cards, not Markdown parsing or entry availability.
+
+Filter dropdown options and counts come from parsed Markdown entries. Deduplicate people, topics, and types case-insensitively. Show only the three most-used topic tags above the results; the complete tag set belongs in the topic selector. Render active filters as removable chips with the filtered result count.
+
+Cards in list, search, tag, day, and calendar-generated results share this collapsed order: type, optional context, optional sender initial/name, title, collapsed summary, and tags. Normalize whitespace and truncate only the collapsed summary to at most 100 characters including `…`, at a word boundary when possible. Preserve full source and JSON summaries, and show the full summary when a card expands. Escape Jinja values normally and use DOM `textContent` for generated cards.
+
+Below 768px, use full-width segmented primary navigation, a compact search-plus-Filters row, horizontally scrolling top topics, one card column, two visible tags plus `+N`, and controls at least 44px high. The native-dialog filter sheet contains Context, Shared by, Topic, and Type controls; it traps focus, closes with its close button or Escape, prevents background scrolling, and restores focus to its trigger.
+
+## Tag semantics
+
+Tags describe link subjects, not type, context, or sender metadata. Automatic generation uses at most three lowercase tags, prefers existing tags, and hyphenates multiple words. Never automatically generate `#article`, `#github`, `#shared`, `#work`, `#personal`, or equivalents that duplicate structured fields. Explicit CLI tags are still accepted.
 
 ## Caching — automatic
 
@@ -140,9 +169,10 @@ Use this sequence before assuming server-side problems:
 
 1. **`curl http://localhost:8090/health`** — get total_entries count
 2. **`curl http://localhost:8090/day-json/YYYY-MM-DD`** — check specific days; returns JSON array of entries
-3. **`curl http://localhost:8090/` | grep 'entry-card'`** — count entry cards in raw HTML
-4. If API returns correct count but browser UI doesn't → **browser cache**, try `Ctrl+Shift+R` or incognito window
-5. If health count is fine but dashboard still shows fewer entries → possible INDEX.md chunk corruption. See `obsidian` skill → **INDEX.md Health Check** section for the Python chunk analysis one-liner that catches merged entries and double-`---` separators in seconds.
+3. **`curl http://localhost:8090/` | grep 'entry-card'`** — confirm the first page contains at most 50 cards and inspect its filtered total/page navigation
+4. Follow the ordinary Next link (or request `?page=2`) to verify entries beyond the first page; preserve any active filter parameters
+5. If API and page totals are correct but the browser differs → **browser cache**, try `Ctrl+Shift+R` or incognito window
+6. If health or filtered totals are unexpectedly low → possible INDEX.md chunk corruption. See `obsidian` skill → **INDEX.md Health Check** section for the Python chunk analysis one-liner that catches merged entries and double-`---` separators in seconds.
 
 **Quick health check (always run after INDEX.md edits):**
 ```bash
@@ -158,20 +188,29 @@ The `/graph` endpoint renders a D3.js force-directed graph over the vault. Data
 is built by `get_graph_data()` in `archive.py` and exposed via `/graph-json`.
 
 **Data shape** (tag-graph, two node kinds):
-- `nodes`: `{id, label, kind: "tag"|"entry", count, type?, url?}`
+- `nodes`: `{id, label, kind: "tag"|"entry", count, type?, url?, shared_by?, context?}`
 - `links`: `{source: tag_id, target: entry_id}` — bipartite, no entry↔entry edges
+
+Every parsed archive entry has one entry node. Entry IDs are deterministic,
+opaque, and unique within a graph response, including for duplicate URLs and
+identical entry occurrences. Consumers must not derive meaning from entry IDs
+or depend on the previous `entry:<raw-url>` format.
 
 **Why tag-graph instead of entry-graph**: with 100+ entries, an entry↔entry
 similarity graph becomes a hairball. Tag hubs collapse shared topics into a
 readable cluster, the way Obsidian's native graph view does. Entry count is
 `O(entries × avg_tags)`, link count is `O(tag_appearances)`.
 
-**Filtering rule**: tags with `count < 2` are dropped (reduces noise from
-one-off tags) and entries that share zero active tags are omitted as orphans.
-With 103 entries this produces ~78 tag nodes + ~101 entry nodes + ~400 links.
+**Filtering rule**: a tag must occur in at least two distinct entries to receive
+a tag node. Tags used by only one entry are intentionally hidden to reduce
+noise, and duplicate tag tokens within one entry count only once. Entries with
+no repeated tags (including entries with no tags) remain visible as standalone
+nodes.
 
-**Front-end interactions** (D3 v7 via CDN, no npm install):
-- drag to reposition, scroll to zoom (0.3×–5×), background dblclick to reset
+**Front-end interactions** (vendored D3 v7, no npm install):
+- drag any node to reposition it; entry nodes stay where dropped while tag
+  nodes rejoin the simulation after dragging
+- scroll to zoom (0.3×–5×), background dblclick to reset
 - click a tag node → highlight that cluster, dim the rest (click again to clear)
 - dblclick an entry node → open its URL in a new tab
 
@@ -192,19 +231,22 @@ For any new page that needs the same nav + footer as the rest of the dashboard:
 
 ## Common failure modes
 
-1. **Dashboard shows fewer entries than expected** — run validate.py; if health count matches vault count, the server is fine — the issue is browser-side
+1. **Dashboard shows fewer entries than expected** — first check the 50-entry pagination controls and filtered total; then run validate.py if entries are absent from every page
 2. **Old process still running on 8090** — new start fails because port is occupied. Always kill first.
 3. **Browser cache** — after any fix, always try `Ctrl+Shift+R` or incognito. The dashboard is read-heavy and browsers aggressively cache it.
-4. **INDEX.md entries missing (root cause: write_file overwrite)** — the link-curator agent may have used `write_file` directly on INDEX.md without reading it first, wiping all previous entries. If only June entries show, May is gone. Fix: rebuild from daily notes using `scripts/rebuild_index.py` (see below). Prevention: use `save_entry.py` from the `obsidian` skill for all new saves — it does atomic read+patch, never full overwrite.
+4. **INDEX.md entries missing** — use the explicit `rebuild_index.py` tool below. It locks the vault and creates a timestamped backup before replacing an existing index. Prevention: use `save_entry.py` for all new saves; it journals the two-file update and atomically replaces each file.
 
 ## Rebuild INDEX.md from daily notes
 
-If INDEX.md was overwritten and entries are missing, rebuild from the daily notes:
+If INDEX.md is damaged or missing, explicitly rebuild it from canonical dated notes:
 
 ```bash
 cd <profile-dir>/skills/note-taking/obsidian/scripts
 python3 rebuild_index.py
 ```
+
+The tool refuses to run while an unresolved save journal exists and backs up an
+existing index before replacement.
 
 Then validate:
 ```bash
@@ -215,7 +257,6 @@ curl http://localhost:8090/reload-cache
 ## Related skills
 
 - `obsidian` — vault entry format, save workflow, validate.py
-- `camofox` — for browser-session fetching on sites that block simple extraction
 
 ## References
 
