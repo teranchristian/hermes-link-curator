@@ -160,6 +160,28 @@
 .active-filters { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .active-filter-chip { min-height: 32px; padding: 0.15rem 0.65rem; background: var(--bg-secondary); }
 
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 1rem 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+.pagination-nav { display: flex; align-items: center; gap: 0.75rem; }
+.pagination-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text);
+}
+.pagination-nav a:hover { border-color: #bbb; text-decoration: none; }
+
 .entry-card {
   padding: 1.05rem 1.15rem;
   cursor: pointer;
@@ -301,6 +323,8 @@
   .results-status { align-items: flex-start; flex-direction: column; }
   .active-filters { flex-wrap: nowrap; width: 100%; overflow-x: auto; padding-bottom: 0.2rem; }
   .active-filter-chip { min-height: 38px; }
+  .pagination-bar { align-items: flex-start; flex-direction: column; }
+  .pagination-nav { width: 100%; justify-content: space-between; }
 
   .days-list { gap: 1.5rem; }
   .day-block__entries { gap: 0.75rem; }

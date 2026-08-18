@@ -10,7 +10,7 @@ import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Generic, Optional, TypeVar
 from urllib.parse import urlsplit
 
 # Configure logging
@@ -65,6 +65,51 @@ class ArchiveDay:
     date: str
     label: str
     entries: list[ArchiveEntry] = field(default_factory=list)
+
+
+T = TypeVar("T")
+PAGE_SIZE = 50
+
+
+@dataclass(frozen=True)
+class PaginationPage(Generic[T]):
+    """One deterministic page of a complete, already-filtered result list."""
+
+    entries: list[T]
+    page: int
+    page_size: int
+    total_results: int
+    total_pages: int
+    first_result: int
+    last_result: int
+    previous_page: Optional[int]
+    next_page: Optional[int]
+
+
+def paginate_entries(entries: list[T], page: int) -> PaginationPage[T]:
+    """Return a fixed-size page without hiding any entries from later pages."""
+    if page < 1:
+        raise ValueError("page must be a positive integer")
+
+    total_results = len(entries)
+    total_pages = max(1, (total_results + PAGE_SIZE - 1) // PAGE_SIZE)
+    if page > total_pages:
+        raise IndexError("page is beyond the final page")
+
+    start_index = (page - 1) * PAGE_SIZE
+    end_index = min(start_index + PAGE_SIZE, total_results)
+    page_entries = entries[start_index:end_index]
+    return PaginationPage(
+        entries=page_entries,
+        page=page,
+        page_size=PAGE_SIZE,
+        total_results=total_results,
+        total_pages=total_pages,
+        first_result=start_index + 1 if page_entries else 0,
+        last_result=end_index if page_entries else 0,
+        previous_page=page - 1 if page > 1 else None,
+        next_page=page + 1 if page < total_pages else None,
+    )
 
 
 def collapsed_summary(summary: str, max_length: int = 100) -> str:
@@ -223,6 +268,11 @@ def group_entries_by_date(entries: list[ArchiveEntry]) -> list[ArchiveDay]:
         days.append(ArchiveDay(date=date, label=label, entries=by_date[date]))
 
     return days
+
+
+def newest_first(entries: list[ArchiveEntry]) -> list[ArchiveEntry]:
+    """Order occurrences newest first, retaining archive order within each day."""
+    return sorted(entries, key=lambda entry: entry.added, reverse=True)
 
 
 def get_tags() -> list[tuple[str, int]]:

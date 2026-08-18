@@ -79,6 +79,8 @@ Never guess `Shared by`; use it only when the user names the person. Set or infe
 
 The list and search pages accept `q`, `context`, `shared_by`, `tag`, and `type` query parameters. Structured filters are independent, combinable, exact, and case-insensitive; `q` remains a case-insensitive substring search across the supported fields. Forms must preserve the other active parameters. Unknown values return an empty result set. Clear/reset actions remove every search and filter parameter.
 
+The list, search, and tag routes use server-side pagination with a fixed 50-entry page size. Apply all search and metadata filters to the complete parsed archive before calculating totals or selecting a page. Previous/Next links preserve active filters, while filter submissions reset to page 1. The list groups only the selected slice by date, so a date may have a heading on consecutive pages without duplicating an entry. Pagination limits rendered cards, not Markdown parsing or entry availability.
+
 Filter dropdown options and counts come from parsed Markdown entries. Deduplicate people, topics, and types case-insensitively. Show only the three most-used topic tags above the results; the complete tag set belongs in the topic selector. Render active filters as removable chips with the filtered result count.
 
 Cards in list, search, tag, day, and calendar-generated results share this collapsed order: type, optional context, optional sender initial/name, title, collapsed summary, and tags. Normalize whitespace and truncate only the collapsed summary to at most 100 characters including `…`, at a word boundary when possible. Preserve full source and JSON summaries, and show the full summary when a card expands. Escape Jinja values normally and use DOM `textContent` for generated cards.
@@ -167,9 +169,10 @@ Use this sequence before assuming server-side problems:
 
 1. **`curl http://localhost:8090/health`** — get total_entries count
 2. **`curl http://localhost:8090/day-json/YYYY-MM-DD`** — check specific days; returns JSON array of entries
-3. **`curl http://localhost:8090/` | grep 'entry-card'`** — count entry cards in raw HTML
-4. If API returns correct count but browser UI doesn't → **browser cache**, try `Ctrl+Shift+R` or incognito window
-5. If health count is fine but dashboard still shows fewer entries → possible INDEX.md chunk corruption. See `obsidian` skill → **INDEX.md Health Check** section for the Python chunk analysis one-liner that catches merged entries and double-`---` separators in seconds.
+3. **`curl http://localhost:8090/` | grep 'entry-card'`** — confirm the first page contains at most 50 cards and inspect its filtered total/page navigation
+4. Follow the ordinary Next link (or request `?page=2`) to verify entries beyond the first page; preserve any active filter parameters
+5. If API and page totals are correct but the browser differs → **browser cache**, try `Ctrl+Shift+R` or incognito window
+6. If health or filtered totals are unexpectedly low → possible INDEX.md chunk corruption. See `obsidian` skill → **INDEX.md Health Check** section for the Python chunk analysis one-liner that catches merged entries and double-`---` separators in seconds.
 
 **Quick health check (always run after INDEX.md edits):**
 ```bash
@@ -228,7 +231,7 @@ For any new page that needs the same nav + footer as the rest of the dashboard:
 
 ## Common failure modes
 
-1. **Dashboard shows fewer entries than expected** — run validate.py; if health count matches vault count, the server is fine — the issue is browser-side
+1. **Dashboard shows fewer entries than expected** — first check the 50-entry pagination controls and filtered total; then run validate.py if entries are absent from every page
 2. **Old process still running on 8090** — new start fails because port is occupied. Always kill first.
 3. **Browser cache** — after any fix, always try `Ctrl+Shift+R` or incognito. The dashboard is read-heavy and browsers aggressively cache it.
 4. **INDEX.md entries missing** — use the explicit `rebuild_index.py` tool below. It locks the vault and creates a timestamped backup before replacing an existing index. Prevention: use `save_entry.py` for all new saves; it journals the two-file update and atomically replaces each file.

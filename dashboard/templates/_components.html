@@ -27,3 +27,16 @@
   {% endif %}
 </article>
 {% endmacro %}
+
+{% macro pagination_nav(pagination, label='Result pages') %}
+{% if pagination.total_results %}
+<div class="pagination-bar">
+  <p class="pagination-summary">Showing {{ pagination.first_result }}–{{ pagination.last_result }} of {{ pagination.total_results }}</p>
+  <nav class="pagination-nav" aria-label="{{ label }}">
+    {% if pagination.has_previous %}<a href="{{ pagination.previous_url }}" rel="prev">Previous</a>{% endif %}
+    <span>Page {{ pagination.page }} of {{ pagination.total_pages }}</span>
+    {% if pagination.has_next %}<a href="{{ pagination.next_url }}" rel="next">Next</a>{% endif %}
+  </nav>
+</div>
+{% endif %}
+{% endmacro %}

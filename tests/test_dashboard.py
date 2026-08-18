@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib
+import html
 import hashlib
 import re
 import sys
 from pathlib import Path
 from types import ModuleType
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -402,6 +404,301 @@ def filter_fixture(vault: Path) -> None:
             url="https://example.com/plain",
         ),
     )
+
+
+def numbered_entries(
+    count: int,
+    *,
+    prefix: str = "Entry",
+    added: str = DATE,
+    tags: str = "#testing",
+    summary: str = "Numbered pagination fixture.",
+    shared_by: str | None = None,
+    context: str | None = None,
+    entry_type: str = "article",
+) -> list[str]:
+    return [
+        entry_block(
+            f"{prefix} {index:03d}",
+            added=added,
+            tags=tags,
+            summary=summary,
+            shared_by=shared_by,
+            context=context,
+            entry_type=entry_type,
+            url=f"https://example.com/{prefix.casefold().replace(' ', '-')}-{index}",
+        )
+        for index in range(count)
+    ]
+
+
+def pagination_href(page_html: str, label: str) -> str:
+    match = re.search(rf'<a href="([^"]+)" rel="(?:prev|next)">{label}</a>', page_html)
+    assert match is not None
+    return html.unescape(match.group(1))
+
+
+@pytest.mark.parametrize(
+    ("count", "first_count", "total_pages", "last_page_count"),
+    [
+        (0, 0, 1, 0),
+        (1, 1, 1, 1),
+        (49, 49, 1, 49),
+        (50, 50, 1, 50),
+        (51, 50, 2, 1),
+        (100, 50, 2, 50),
+        (127, 50, 3, 27),
+    ],
+)
+def test_pagination_helper_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    count: int,
+    first_count: int,
+    total_pages: int,
+    last_page_count: int,
+) -> None:
+    archive, _, _ = load_modules(monkeypatch, tmp_path / "vault")
+    values = list(range(count))
+
+    first = archive.paginate_entries(values, 1)
+    last = archive.paginate_entries(values, total_pages)
+
+    assert archive.PAGE_SIZE == 50
+    assert len(first.entries) == first_count
+    assert len(last.entries) == last_page_count
+    assert first.total_results == count
+    assert first.total_pages == total_pages
+    assert (first.first_result, first.last_result) == ((1, first_count) if count else (0, 0))
+    assert first.previous_page is None
+    assert last.next_page is None
+
+
+def test_pagination_helper_has_no_duplicates_or_gaps() -> None:
+    sys.path.insert(0, str(DASHBOARD))
+    try:
+        archive = importlib.import_module("archive")
+        values = list(range(137))
+        pages = [archive.paginate_entries(values, page).entries for page in (1, 2, 3)]
+    finally:
+        sys.path.pop(0)
+
+    flattened = [value for page in pages for value in page]
+    assert flattened == values
+    assert len(flattened) == len(set(flattened)) == 137
+    assert all(len(page) <= 50 for page in pages)
+
+
+def test_large_temporary_vault_reaches_every_entry_across_html_pages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    write_index(vault, *numbered_entries(121, prefix="Large archive"))
+    _, _, client = make_dashboard_client(monkeypatch, vault)
+
+    responses = [client.get(path) for path in ("/", "/?page=2", "/?page=3")]
+    rendered_titles = [
+        title
+        for response in responses
+        for title in re.findall(r">(Large archive \d{3})</a>", response.text)
+    ]
+
+    assert [response.status_code for response in responses] == [200, 200, 200]
+    assert [response.text.count('class="entry-card is-collapsed"') for response in responses] == [
+        50,
+        50,
+        21,
+    ]
+    assert "Showing 1–50 of 121" in responses[0].text
+    assert "Showing 51–100 of 121" in responses[1].text
+    assert "Showing 101–121 of 121" in responses[2].text
+    assert rendered_titles == [f"Large archive {index:03d}" for index in range(121)]
+    assert len(rendered_titles) == len(set(rendered_titles))
+
+
+def test_home_paginates_newest_first_and_preserves_same_day_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    entries = [
+        entry_block("Old", added="2026-08-15", url="https://example.com/old"),
+        entry_block("Newest first", added="2026-08-17", url="https://example.com/newest-first"),
+        entry_block("Newest second", added="2026-08-17", url="https://example.com/newest-second"),
+        entry_block("Middle", added="2026-08-16", url="https://example.com/middle"),
+    ]
+    write_index(vault, *entries)
+    _, main, client = make_dashboard_client(monkeypatch, vault)
+
+    ordered = [entry.title for entry in main.build_dashboard_context("/")["entries"]]
+    response = client.get("/")
+
+    assert ordered == ["Newest first", "Newest second", "Middle", "Old"]
+    assert response.status_code == 200
+    title_positions = [
+        response.text.index(f">{title}</a>")
+        for title in ("Newest first", "Newest second", "Middle", "Old")
+    ]
+    assert title_positions == sorted(title_positions)
+
+
+def test_home_date_grouping_can_span_page_boundary_without_duplication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    write_index(
+        vault,
+        *numbered_entries(60, prefix="Same day", added="2026-08-17"),
+        *numbered_entries(5, prefix="Older day", added="2026-08-16"),
+    )
+    _, _, client = make_dashboard_client(monkeypatch, vault)
+
+    first = client.get("/")
+    second = client.get("/?page=2")
+
+    assert first.text.count('class="entry-card is-collapsed"') == 50
+    assert second.text.count('class="entry-card is-collapsed"') == 15
+    assert first.text.count('class="day-block__date">17 Aug 2026</a>') == 1
+    assert second.text.count('class="day-block__date">17 Aug 2026</a>') == 1
+    assert second.text.count('class="day-block__date">16 Aug 2026</a>') == 1
+    assert "Same day 049" in first.text and "Same day 049" not in second.text
+    assert "Same day 050" not in first.text and "Same day 050" in second.text
+    assert second.text.index("17 Aug 2026") < second.text.index("16 Aug 2026")
+
+
+@pytest.mark.parametrize("path", ["/?page=0", "/?page=-1", "/?page=banana"])
+def test_invalid_page_values_are_rejected_by_fastapi(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, path: str
+) -> None:
+    vault = tmp_path / "vault"
+    write_index(vault, entry_block())
+    _, _, client = make_dashboard_client(monkeypatch, vault)
+
+    assert client.get(path).status_code == 422
+
+
+def test_default_empty_and_out_of_range_page_behavior(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    empty_vault = tmp_path / "empty-vault"
+    write_index(empty_vault)
+    _, _, empty_client = make_dashboard_client(monkeypatch, empty_vault)
+
+    empty = empty_client.get("/")
+    assert empty.status_code == 200
+    assert "No links match" in empty.text
+    assert "Showing 1–0" not in empty.text
+    assert empty_client.get("/?page=2").status_code == 404
+
+    full_vault = tmp_path / "full-vault"
+    write_index(full_vault, *numbered_entries(51))
+    _, _, full_client = make_dashboard_client(monkeypatch, full_vault)
+    default = full_client.get("/")
+    assert default.status_code == 200
+    assert "Page 1 of 2" in default.text
+    assert full_client.get("/?page=3").status_code == 404
+
+
+def test_all_filters_run_before_pagination_and_navigation_preserves_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    non_matches = numbered_entries(
+        255,
+        prefix="Unfiltered",
+        tags="#other",
+        summary="Something unrelated.",
+        shared_by="Bob",
+        context="work",
+        entry_type="tool",
+    )
+    matches = numbered_entries(
+        72,
+        prefix="Banana match",
+        tags="#kids #fruit",
+        summary="Banana family reference.",
+        shared_by="Alice & Co",
+        context="personal",
+        entry_type="article",
+    )
+    write_index(vault, *non_matches, *matches)
+    _, _, client = make_dashboard_client(monkeypatch, vault)
+    params = {
+        "q": "banana",
+        "context": "personal",
+        "shared_by": "Alice & Co",
+        "tag": "kids",
+        "type": "article",
+    }
+
+    first = client.get("/", params=params)
+    next_href = pagination_href(first.text, "Next")
+    second = client.get(next_href)
+
+    assert first.status_code == second.status_code == 200
+    assert first.text.count('class="entry-card is-collapsed"') == 50
+    assert second.text.count('class="entry-card is-collapsed"') == 22
+    assert "Showing 1–50 of 72" in first.text
+    assert "Showing 51–72 of 72" in second.text
+    assert "Banana match 000" in first.text
+    assert "Unfiltered 000" not in first.text
+    parsed = urlsplit(next_href)
+    assert parse_qs(parsed.query) == {**{key: [value] for key, value in params.items()}, "page": ["2"]}
+    assert parsed.query.count("page=") == 1
+    assert 'name="page"' not in first.text
+
+
+def test_search_and_tag_routes_paginate_complete_match_sets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    write_index(
+        vault,
+        *numbered_entries(61, prefix="Needle", tags="#kids #testing", summary="Needle result."),
+        *numbered_entries(55, prefix="Other", tags="#other", summary="Unrelated."),
+    )
+    _, _, client = make_dashboard_client(monkeypatch, vault)
+
+    search_first = client.get("/search", params={"q": "needle"})
+    search_next = pagination_href(search_first.text, "Next")
+    search_second = client.get(search_next)
+    tag_first = client.get("/tag/kids", params={"type": "article"})
+    tag_next = pagination_href(tag_first.text, "Next")
+    tag_second = client.get(tag_next)
+
+    assert search_first.text.count('class="entry-card is-collapsed"') == 50
+    assert search_second.text.count('class="entry-card is-collapsed"') == 11
+    assert "Showing 51–61 of 61" in search_second.text
+    assert parse_qs(urlsplit(search_next).query) == {"q": ["needle"], "page": ["2"]}
+    assert tag_first.text.count('class="entry-card is-collapsed"') == 50
+    assert tag_second.text.count('class="entry-card is-collapsed"') == 11
+    assert urlsplit(tag_next).path == "/tag/kids"
+    assert parse_qs(urlsplit(tag_next).query) == {"type": ["article"], "page": ["2"]}
+
+
+def test_malicious_filter_values_are_escaped_and_safely_encoded_in_page_links(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    malicious = '\"><script>alert(1)</script> & value'
+    write_index(
+        vault,
+        *numbered_entries(
+            51,
+            prefix="Unsafe query fixture",
+            shared_by=malicious,
+            summary="Unsafe query fixture.",
+        ),
+    )
+    _, _, client = make_dashboard_client(monkeypatch, vault)
+
+    response = client.get("/", params={"shared_by": malicious})
+    next_href = pagination_href(response.text, "Next")
+
+    assert response.status_code == 200
+    assert "<script>alert(1)</script>" not in response.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in response.text
+    assert parse_qs(urlsplit(next_href).query) == {"shared_by": [malicious], "page": ["2"]}
+    assert next_href.count("page=") == 1
 
 
 def test_collapsed_cards_show_sender_and_omit_missing_metadata(

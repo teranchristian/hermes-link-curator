@@ -13,6 +13,19 @@ FastAPI app that serves a read-only Obsidian-style web UI over a markdown vault.
 - **Stats** (`/stats`) — JSON: total entries, days, type counts, top tags
 - **Health** (`/health`) — JSON: server status + entry count
 
+## Archive pagination
+
+The list, search, and tag pages render 50 entries per page. Search and metadata
+filters are applied to the complete archive before totals and page slices are
+calculated, and Previous/Next links preserve the active query and filter values.
+Changing or submitting a filter starts again at page 1.
+
+The main list groups each selected page slice by date. If one date spans a page
+boundary, its date heading appears on both pages without duplicating entries.
+Pagination limits rendered cards and browser DOM size only: the Markdown archive
+is still parsed in memory so filtering and totals include every matching entry,
+and every match remains reachable through the page links.
+
 ## How it finds the vault
 
 Auto-discovery: the script computes the vault path as `<this-file>/../../vault`. So if you copy the dashboard to `<profile-dir>/dashboard/`, the vault is automatically `<profile-dir>/vault/`.

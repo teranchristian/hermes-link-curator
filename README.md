@@ -11,7 +11,8 @@ through a responsive FastAPI dashboard.
 The dashboard includes list, calendar, day, search, tag, and graph views. Cards
 support optional `Shared by` and `Context` metadata, combinable filters, compact
 mobile layouts, and collapsed summaries without changing the full Markdown or
-JSON data.
+JSON data. Archive-list pages apply filters to the complete Markdown archive and
+then paginate the matching cards in fixed 50-entry pages.
 
 ## Requirements
 

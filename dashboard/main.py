@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from urllib.parse import urlencode
+from typing import Annotated
+from urllib.parse import quote, urlencode
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -20,6 +21,8 @@ from archive import (
     get_graph_data,
     get_tags,
     group_entries_by_date,
+    newest_first,
+    paginate_entries,
     sender_initial,
 )
 
@@ -69,16 +72,25 @@ def _query_url(path: str, values: dict[str, str]) -> str:
     return f"{path}?{query}" if query else path
 
 
+def _page_url(path: str, values: dict[str, str], page: int) -> str:
+    """Build an encoded page link from canonical single-value filter state."""
+    pairs = [(key, values[key]) for key in FILTER_KEYS if values.get(key)]
+    pairs.append(("page", str(page)))
+    return f"{path}?{urlencode(pairs)}"
+
+
 def build_dashboard_context(
     path: str,
     *,
+    page: int = 1,
     q: str = "",
     context: str = "",
     shared_by: str = "",
     tag: str = "",
     entry_type: str = "",
+    fixed_tag: str = "",
 ) -> dict:
-    """Build shared filter state, options, links, and filtered entries."""
+    """Filter the complete archive, then paginate it and build shared UI state."""
     selected = {
         "q": q.strip(),
         "context": context.strip(),
@@ -86,14 +98,21 @@ def build_dashboard_context(
         "tag": tag.strip(),
         "type": entry_type.strip(),
     }
-    entries = filter_entries(
+    filtered_entries = filter_entries(
         get_all_entries(),
         query=selected["q"],
         context=selected["context"],
         shared_by=selected["shared_by"],
-        tag=selected["tag"],
+        tag=fixed_tag or selected["tag"],
         entry_type=selected["type"],
     )
+    ordered_entries = newest_first(filtered_entries)
+    try:
+        pagination_page = paginate_entries(ordered_entries, page)
+    except IndexError:
+        raise HTTPException(status_code=404, detail=f"Page {page} is out of range") from None
+
+    entries = pagination_page.entries
     options = get_filter_options()
     selected_context = selected["context"].casefold()
     selected_sender = selected["shared_by"].casefold()
@@ -140,11 +159,33 @@ def build_dashboard_context(
             "active": topic.lstrip("#").casefold() == selected_tag,
         })
 
+    pagination = {
+        "page": pagination_page.page,
+        "page_size": pagination_page.page_size,
+        "total_results": pagination_page.total_results,
+        "total_pages": pagination_page.total_pages,
+        "first_result": pagination_page.first_result,
+        "last_result": pagination_page.last_result,
+        "has_previous": pagination_page.previous_page is not None,
+        "has_next": pagination_page.next_page is not None,
+        "previous_url": (
+            _page_url(path, selected, pagination_page.previous_page)
+            if pagination_page.previous_page is not None
+            else None
+        ),
+        "next_url": (
+            _page_url(path, selected, pagination_page.next_page)
+            if pagination_page.next_page is not None
+            else None
+        ),
+    }
+
     return {
         "entries": entries,
         "days": group_entries_by_date(entries),
         "results": entries,
-        "result_count": len(entries),
+        "result_count": pagination_page.total_results,
+        "pagination": pagination,
         "query": selected["q"],
         "selected": selected,
         "selected_context": selected_context,
@@ -188,9 +229,10 @@ async def home(
     shared_by: str = "",
     tag: str = "",
     type: str = "",
+    page: Annotated[int, Query(ge=1)] = 1,
 ) -> HTMLResponse:
     dashboard = build_dashboard_context(
-        "/", q=q, context=context, shared_by=shared_by, tag=tag, entry_type=type
+        "/", page=page, q=q, context=context, shared_by=shared_by, tag=tag, entry_type=type
     )
     all_days = get_entries_by_date()
     ctx = {
@@ -232,9 +274,16 @@ async def search(
     shared_by: str = "",
     tag: str = "",
     type: str = "",
+    page: Annotated[int, Query(ge=1)] = 1,
 ) -> HTMLResponse:
     dashboard = build_dashboard_context(
-        "/search", q=q, context=context, shared_by=shared_by, tag=tag, entry_type=type
+        "/search",
+        page=page,
+        q=q,
+        context=context,
+        shared_by=shared_by,
+        tag=tag,
+        entry_type=type,
     )
     ctx = {
         "request": request,
@@ -250,8 +299,25 @@ async def search(
 
 
 @app.get("/tag/{tag}", response_class=HTMLResponse)
-async def by_tag(request: Request, tag: str) -> HTMLResponse:
-    entries = filter_entries(get_all_entries(), tag=tag)
+async def by_tag(
+    request: Request,
+    tag: str,
+    q: str = "",
+    context: str = "",
+    shared_by: str = "",
+    type: str = "",
+    page: Annotated[int, Query(ge=1)] = 1,
+) -> HTMLResponse:
+    path = f"/tag/{quote(tag, safe='')}"
+    dashboard = build_dashboard_context(
+        path,
+        page=page,
+        q=q,
+        context=context,
+        shared_by=shared_by,
+        entry_type=type,
+        fixed_tag=tag,
+    )
     ctx = {
         "request": request,
         "page_title": f"Archive - #{tag}",
@@ -260,7 +326,9 @@ async def by_tag(request: Request, tag: str) -> HTMLResponse:
         "total_days": len(get_entries_by_date()),
         "generated_at": "",
         "tag": tag,
-        "tag_entries": entries,
+        "tag_entries": dashboard["entries"],
+        "result_count": dashboard["result_count"],
+        "pagination": dashboard["pagination"],
         **build_tags_context(),
     }
     return templates.TemplateResponse(request=request, name="tag.html", context=ctx)

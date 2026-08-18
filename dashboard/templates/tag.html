@@ -1,14 +1,20 @@
 {% extends "base.html" %}
-{% from "_components.html" import entry_card %}
+{% from "_components.html" import entry_card, pagination_nav %}
 
 {% block content %}
 <div class="container">
   <div class="view-heading">
     <a href="/">← All links</a>
-    <span>· {{ tag_entries|length }} link{% if tag_entries|length != 1 %}s{% endif %} tagged #{{ tag }}</span>
+    <span>· {{ result_count }} link{% if result_count != 1 %}s{% endif %} tagged #{{ tag }}</span>
   </div>
+  {{ pagination_nav(pagination, 'Result pages above entries') }}
+  {% if tag_entries %}
   <div class="days-list search-results">
     {% for entry in tag_entries %}{{ entry_card(entry) }}{% endfor %}
   </div>
+  {{ pagination_nav(pagination, 'Result pages below entries') }}
+  {% else %}
+  <div class="empty-state">No links match this tag and the current filters.</div>
+  {% endif %}
 </div>
 {% endblock %}

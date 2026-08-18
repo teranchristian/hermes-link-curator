@@ -1,15 +1,17 @@
 {% extends "base.html" %}
-{% from "_components.html" import entry_card %}
+{% from "_components.html" import entry_card, pagination_nav %}
 {% from "_dashboard_controls.html" import dashboard_controls with context %}
 
 {% block content %}
 <div class="container dashboard-page">
   {{ dashboard_controls() }}
+  {{ pagination_nav(pagination, 'Result pages above entries') }}
 
   {% if results %}
   <div class="days-list search-results">
     {% for entry in results %}{{ entry_card(entry) }}{% endfor %}
   </div>
+  {{ pagination_nav(pagination, 'Result pages below entries') }}
   {% else %}
   <div class="empty-state">No links match the current search and filters.</div>
   {% endif %}
